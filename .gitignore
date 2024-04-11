@@ -75,3 +75,4 @@ crashlytics-build.properties
 
 
 # Downloaded Assets will be placed here
+/[Aa]ssets/Downloaded Assets
