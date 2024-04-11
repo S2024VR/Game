@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Generic;
+using UnityEngine.Events;
 using UnityEngine.InputSystem;
 using UnityEngine.XR.Interaction.Toolkit.UI;
 
@@ -86,6 +87,12 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
         [Tooltip("If true, UI scrolling will be enabled.")]
         bool m_UIScrollingEnabled;
 
+        [Space]
+        [Header("Mediation Events")]
+        [SerializeField]
+        [Tooltip("Event fired when the active ray interactor changes between interaction and teleport.")]
+        UnityEvent<IXRRayProvider> m_RayInteractorChanged;
+
         public bool smoothMotionEnabled
         {
             get => m_SmoothMotionEnabled;
@@ -116,8 +123,9 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
             }
         }
 
+        bool m_StartCalled;
         bool m_PostponedDeactivateTeleport;
-        bool m_UIScrollModeActive = false;
+        bool m_HoveringScrollableUI;
 
         const int k_InteractorNotInGroup = -1;
 
@@ -156,21 +164,27 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
             if (teleportModeCancelAction != null)
             {
                 teleportModeCancelAction.performed += OnCancelTeleport;
-                teleportModeActivateAction.canceled += OnStopLocomotion;
             }
 
             var moveAction = GetInputAction(m_Move);
             if (moveAction != null)
             {
-                moveAction.performed += OnStartLocomotion;
+                moveAction.started += OnStartLocomotion;
                 moveAction.canceled += OnStopLocomotion;
             }
 
             var turnAction = GetInputAction(m_Turn);
             if (turnAction != null)
             {
-                turnAction.performed += OnStartLocomotion;
+                turnAction.started += OnStartLocomotion;
                 turnAction.canceled += OnStopLocomotion;
+            }
+
+            var snapTurnAction = GetInputAction(m_SnapTurn);
+            if (snapTurnAction != null)
+            {
+                snapTurnAction.started += OnStartLocomotion;
+                snapTurnAction.canceled += OnStopLocomotion;
             }
         }
 
@@ -195,21 +209,27 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
             if (teleportModeCancelAction != null)
             {
                 teleportModeCancelAction.performed -= OnCancelTeleport;
-                teleportModeCancelAction.performed -= OnStopLocomotion;
             }
 
             var moveAction = GetInputAction(m_Move);
             if (moveAction != null)
             {
-                moveAction.performed -= OnStartLocomotion;
+                moveAction.started -= OnStartLocomotion;
                 moveAction.canceled -= OnStopLocomotion;
             }
 
             var turnAction = GetInputAction(m_Turn);
             if (turnAction != null)
             {
-                turnAction.performed -= OnStartLocomotion;
+                turnAction.started -= OnStartLocomotion;
                 turnAction.canceled -= OnStopLocomotion;
+            }
+
+            var snapTurnAction = GetInputAction(m_SnapTurn);
+            if (snapTurnAction != null)
+            {
+                snapTurnAction.started -= OnStartLocomotion;
+                snapTurnAction.canceled -= OnStopLocomotion;
             }
         }
 
@@ -222,6 +242,8 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 
             if (m_RayInteractor != null)
                 m_RayInteractor.gameObject.SetActive(false);
+
+            m_RayInteractorChanged?.Invoke(m_TeleportInteractor);
         }
 
         void OnCancelTeleport(InputAction.CallbackContext context)
@@ -235,13 +257,12 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
             if (m_RayInteractor != null)
                 m_RayInteractor.gameObject.SetActive(true);
 
+            m_RayInteractorChanged?.Invoke(m_RayInteractor);
+
         }
 
         void OnStartLocomotion(InputAction.CallbackContext context)
         {
-            if (!context.started)
-                return;
-
             m_LocomotionUsers.Add(context.action);
         }
 
@@ -249,9 +270,10 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
         {
             m_LocomotionUsers.Remove(context.action);
 
-            if (m_LocomotionUsers.Count == 0 && m_UIScrollModeActive)
+            if (m_LocomotionUsers.Count == 0 && m_HoveringScrollableUI)
             {
                 DisableLocomotionActions();
+                UpdateUIActions();
             }
         }
 
@@ -269,12 +291,11 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 
         void OnUIHoverEntered(UIHoverEventArgs args)
         {
-            m_UIScrollModeActive = args.deviceModel.isScrollable && m_UIScrollingEnabled; 
-            if (!m_UIScrollModeActive)
-                return;
+            m_HoveringScrollableUI = m_UIScrollingEnabled && args.deviceModel.isScrollable;
+            UpdateUIActions();
 
             // If locomotion is occurring, wait
-            if (m_LocomotionUsers.Count == 0)
+            if (m_HoveringScrollableUI && m_LocomotionUsers.Count == 0)
             {
                 // Disable locomotion and turn actions
                 DisableLocomotionActions();
@@ -283,7 +304,8 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 
         void OnUIHoverExited(UIHoverEventArgs args)
         {
-            m_UIScrollModeActive = false;
+            m_HoveringScrollableUI = false;
+            UpdateUIActions();
 
             // Re-enable the locomotion and turn actions
             UpdateLocomotionActions();
@@ -298,6 +320,11 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
         {
             if (m_TeleportInteractor != null)
                 m_TeleportInteractor.gameObject.SetActive(false);
+
+            // Allow the locomotion actions to be refreshed when this is re-enabled.
+            // See comments in Start for why we wait until Start to enable/disable locomotion actions.
+            if (m_StartCalled)
+                UpdateLocomotionActions();
 
             SetupInteractorEvents();
 
@@ -316,6 +343,8 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 
         protected void Start()
         {
+            m_StartCalled = true;
+
             // Ensure the enabled state of locomotion and turn actions are properly set up.
             // Called in Start so it is done after the InputActionManager enables all input actions earlier in OnEnable.
             UpdateLocomotionActions();
@@ -418,7 +447,7 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 
         void UpdateUIActions()
         {
-            SetEnabled(m_UIScroll, m_UIScrollingEnabled);
+            SetEnabled(m_UIScroll, m_UIScrollingEnabled && m_HoveringScrollableUI && m_LocomotionUsers.Count == 0);
         }
 
         static void SetEnabled(InputActionReference actionReference, bool enabled)
